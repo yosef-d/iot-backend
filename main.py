@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, Header, HTTPException, Depends, Query
+﻿from fastapi import FastAPI, Header, HTTPException, Depends, Query, Response
 from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime
@@ -7,6 +7,7 @@ from psycopg.types.json import Json
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
 
+# --- Auth por token de dispositivo (Bearer) ---
 def get_device_id(authorization: Optional[str] = Header(None)) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer token")
@@ -17,8 +18,9 @@ def get_device_id(authorization: Optional[str] = Header(None)) -> str:
     )
     if not row:
         raise HTTPException(status_code=401, detail="Invalid token")
-    return row[0]
+    return row[0]  # UUID
 
+# --- Modelo de entrada ---
 class ReadingIn(BaseModel):
     lat: float
     lon: float
@@ -39,6 +41,10 @@ class ReadingIn(BaseModel):
             raise ValueError("lon out of range")
         return v
 
+@app.get("/")
+def root():
+    return {"ok": True, "service": "iot-backend"}
+
 @app.get("/health")
 def health():
     row = fetchone("SELECT 1")
@@ -46,6 +52,7 @@ def health():
 
 @app.post("/ingest")
 def ingest(payload: ReadingIn, device_id: str = Depends(get_device_id)):
+    # Parseo opcional del tiempo de lectura
     read_at: Optional[datetime] = None
     if payload.time:
         try:
@@ -53,23 +60,29 @@ def ingest(payload: ReadingIn, device_id: str = Depends(get_device_id)):
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid time format (ISO-8601 expected)")
 
-    row = execute(
-        """
-        INSERT INTO public.readings (device_id, lat, lon, alt_m, read_at, payload)
-        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-        RETURNING id
-        """,
-        (
-            device_id,
-            payload.lat,
-            payload.lon,
-            payload.alt,
-            read_at,
-            Json({"lat": payload.lat, "lon": payload.lon, "alt": payload.alt, "time": payload.time}),
-        ),
-        returning=True
-    )
-    return {"inserted_id": row[0]}
+    # INSERT con adaptación JSON de psycopg
+    try:
+        row = execute(
+            """
+            INSERT INTO public.readings (device_id, lat, lon, alt_m, read_at, payload)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                device_id,
+                payload.lat,
+                payload.lon,
+                payload.alt,
+                read_at,
+                Json({"lat": payload.lat, "lon": payload.lon, "alt": payload.alt, "time": payload.time}),
+            ),
+            returning=True
+        )
+        return {"inserted_id": row[0]}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"ingest_failed: {e}")
 
 @app.get("/readings/recent")
 def recent(
@@ -106,6 +119,7 @@ def recent(
         }
     return {"items": [to_obj(r) for r in rows]}
 
+# CORS abierto temporal para frontend
 try:
     from fastapi.middleware.cors import CORSMiddleware
     app.add_middleware(
@@ -117,4 +131,3 @@ try:
     )
 except Exception:
     pass
-
