@@ -60,22 +60,28 @@ def ingest(payload: ReadingIn, device_id: str = Depends(get_device_id)):
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid time format (ISO-8601 expected)")
 
-    # INSERT con adaptación JSON de psycopg
+    # Construir parámetros asegurando tipos y JSON adaptado
+    from uuid import UUID
+    from psycopg.types.json import Json
     try:
+        dev_id_str = str(device_id)  # por si viene como UUID
+        lat_f = float(payload.lat)
+        lon_f = float(payload.lon)
+        alt_f = float(payload.alt) if payload.alt is not None else None
+        payload_json = Json(payload.model_dump())
+
+        params = (dev_id_str, lat_f, lon_f, alt_f, read_at, payload_json)
+
+        # Trazas de tipos al log
+        print("INGEST PARAM TYPES:", [type(p).__name__ for p in params])
+
         row = execute(
             """
             INSERT INTO public.readings (device_id, lat, lon, alt_m, read_at, payload)
             VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (
-                device_id,
-                payload.lat,
-                payload.lon,
-                payload.alt,
-                read_at,
-                Json({"lat": payload.lat, "lon": payload.lon, "alt": payload.alt, "time": payload.time}),
-            ),
+            params,
             returning=True
         )
         return {"inserted_id": row[0]}
@@ -141,6 +147,26 @@ def ingest_lite(payload: ReadingIn, device_id: str = Depends(get_device_id)):
             RETURNING id
             """,
             (device_id, payload.lat, payload.lon),
+            returning=True
+        )
+        return {"inserted_id": row[0]}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"ingest_lite_failed: {e}")
+
+@app.post("/ingest_lite")
+def ingest_lite(payload: ReadingIn, device_id: str = Depends(get_device_id)):
+    try:
+        params = (str(device_id), float(payload.lat), float(payload.lon))
+        print("INGEST_LITE TYPES:", [type(p).__name__ for p in params])
+        row = execute(
+            """
+            INSERT INTO public.readings (device_id, lat, lon)
+            VALUES (%s, %s, %s)
+            RETURNING id
+            """,
+            params,
             returning=True
         )
         return {"inserted_id": row[0]}
