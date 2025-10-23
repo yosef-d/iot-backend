@@ -73,8 +73,7 @@ def ingest(payload: ReadingIn, device_id: str = Depends(get_device_id)):
         params = (dev_id_str, lat_f, lon_f, alt_f, read_at, payload_json)
 
         # Trazas de tipos al log
-        print("INGEST PARAM TYPES:", [type(p).__name__ for p in params])
-
+        
         row = execute(
             """
             INSERT INTO public.readings (device_id, lat, lon, alt_m, read_at, payload)
@@ -174,3 +173,4 @@ def ingest_lite(payload: ReadingIn, device_id: str = Depends(get_device_id)):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"ingest_lite_failed: {e}")
+
