@@ -3,6 +3,7 @@ from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime
 from db import fetchone, fetchall, execute
+from psycopg.types.json import Json
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
 
@@ -64,7 +65,7 @@ def ingest(payload: ReadingIn, device_id: str = Depends(get_device_id)):
             payload.lon,
             payload.alt,
             read_at,
-            {"lat": payload.lat, "lon": payload.lon, "alt": payload.alt, "time": payload.time},
+            Json({"lat": payload.lat, "lon": payload.lon, "alt": payload.alt, "time": payload.time}),
         ),
         returning=True
     )
@@ -116,3 +117,4 @@ try:
     )
 except Exception:
     pass
+
