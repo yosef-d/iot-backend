@@ -131,3 +131,20 @@ try:
     )
 except Exception:
     pass
+@app.post("/ingest_lite")
+def ingest_lite(payload: ReadingIn, device_id: str = Depends(get_device_id)):
+    try:
+        row = execute(
+            """
+            INSERT INTO public.readings (device_id, lat, lon)
+            VALUES (%s, %s, %s)
+            RETURNING id
+            """,
+            (device_id, payload.lat, payload.lon),
+            returning=True
+        )
+        return {"inserted_id": row[0]}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"ingest_lite_failed: {e}")
