@@ -9,33 +9,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from psycopg.types.json import Json
 
-# 👇 helpers que ya tienes en tu proyecto
 from db import fetchone, fetchall, execute
 
 # =========================================================
-# CONFIGURACIÓN BÁSICA
+# CONFIG
 # =========================================================
 
-# token que usas en PowerShell
 SAFE_TOKEN = os.getenv(
     "SAFE_TOKEN",
     "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG",
 )
 
-# device por defecto que ya existe en tu tabla
+# este es el que ya existe en tu DB
 DEFAULT_DEVICE_ID = UUID("0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9")
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
 
-# permitir frontend local y vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://iot-frontend-iota.vercel.app",
-        # si quieres ser más relajado, puedes dejar "*"
-        # "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -58,9 +53,6 @@ class ReadingIn(BaseModel):
 # =========================================================
 
 def require_token(authorization: str | None):
-    """
-    Valida 'Authorization: Bearer <token>'.
-    """
     if not authorization:
         raise HTTPException(status_code=401, detail="missing_token")
     parts = authorization.split()
@@ -75,9 +67,6 @@ def utcnow() -> datetime:
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Distancia en metros entre dos puntos lat/lon.
-    """
     R = 6371000.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -86,6 +75,15 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+
+def safe_iso(dt: Any) -> Optional[str]:
+    if not dt:
+        return None
+    if isinstance(dt, datetime):
+        return dt.isoformat()
+    # por si viniera string
+    return str(dt)
 
 
 # =========================================================
@@ -99,9 +97,6 @@ def root():
 
 @app.get("/health")
 def health():
-    """
-    Comprueba que la app corre y que la DB responde.
-    """
     row = fetchone("SELECT 1 AS ok;")
     return {"ok": True, "db": bool(row and row.get("ok") == 1)}
 
@@ -111,9 +106,6 @@ def ingest_lite(
     payload: ReadingIn,
     authorization: str | None = Header(default=None),
 ):
-    """
-    Versión mínima: guarda lat/lon (+ alt si viene).
-    """
     require_token(authorization)
 
     row = execute(
@@ -146,9 +138,6 @@ def ingest(
     payload: ReadingIn,
     authorization: str | None = Header(default=None),
 ):
-    """
-    Versión completa: igual a ingest_lite pero explícita.
-    """
     require_token(authorization)
 
     row = execute(
@@ -182,11 +171,10 @@ def recent(
     device: Optional[str] = None,
 ):
     """
-    Últimas lecturas para mostrar en la tabla del frontend.
-    Si no mandas ?device=, usamos el UUID por defecto.
+    Últimas lecturas.
+    Si no mandas ?device= usa el que usamos en ingest.
     """
     if device is None:
-        # usa el que estás usando en ingest
         device = str(DEFAULT_DEVICE_ID)
 
     rows = fetchall(
@@ -207,25 +195,21 @@ def readings_track(
     device: Optional[str] = Query(None, description="ID lógico o UUID del dispositivo"),
     start: datetime | None = Query(None, description="inicio ISO"),
     end: datetime | None = Query(None, description="fin ISO"),
-    order: str = Query("asc", pattern="^(asc|desc)$"),
+    order: str = Query("asc", description="asc o desc"),
     limit: int = Query(500, ge=1, le=2000),
 ):
     """
-    Devuelve los puntos de una ruta para poder pintarla en el mapa.
-    - Si mandas ?device=ipn-zac-sim-01 → filtra por ese device_id
-    - Si NO mandas device → toma TODO (o el UUID por defecto, ver abajo)
-    - Puedes mandar start y end en ISO para acotar
-    - Devuelve también un summary con distancia y duración
+    Regresa puntos para pintar la ruta y un resumen.
     """
-    clauses = []
+    # --- construir WHERE ---
+    clauses: list[str] = []
     params: list[Any] = []
 
     if device:
-        # filtrar por el device que mandó el frontend
         clauses.append("device_id = %s")
         params.append(device)
     else:
-        # si no mandó device, usamos el de siempre
+        # si no mandan device, usa el de siempre
         clauses.append("device_id = %s")
         params.append(str(DEFAULT_DEVICE_ID))
 
@@ -250,7 +234,10 @@ def readings_track(
 
     rows = fetchall(query, tuple(params))
 
-    # -------- normalizamos para el frontend --------
+    # log sencillo para Railway
+    print(f"[track] device={device} rows={len(rows)}")
+
+    # --- normalizar para frontend ---
     points: list[dict[str, Any]] = []
     for r in rows:
         points.append(
@@ -260,12 +247,12 @@ def readings_track(
                 "lat": float(r["lat"]) if r["lat"] is not None else None,
                 "lon": float(r["lon"]) if r["lon"] is not None else None,
                 "alt_m": float(r["alt_m"]) if r["alt_m"] is not None else None,
-                "read_at": r["read_at"].isoformat() if r["read_at"] else None,
-                "ts": r["ts"].isoformat() if r["ts"] else None,
+                "read_at": safe_iso(r["read_at"]),
+                "ts": safe_iso(r["ts"]),
             }
         )
 
-    # -------- cálculo de distancia y duración --------
+    # --- distancia ---
     total_dist = 0.0
     for i in range(1, len(points)):
         p1 = points[i - 1]
@@ -278,15 +265,19 @@ def readings_track(
         ):
             total_dist += haversine_m(p1["lat"], p1["lon"], p2["lat"], p2["lon"])
 
-    # duración
-    duration_s = None
-    if points:
-        first_time = points[0]["read_at"] or points[0]["ts"]
-        last_time = points[-1]["read_at"] or points[-1]["ts"]
-        if first_time and last_time:
-            t1 = datetime.fromisoformat(first_time.replace("Z", "+00:00"))
-            t2 = datetime.fromisoformat(last_time.replace("Z", "+00:00"))
-            duration_s = (t2 - t1).total_seconds()
+    # --- duración ---
+    duration_s: Optional[float] = None
+    if len(points) >= 2:
+        start_s = points[0]["read_at"] or points[0]["ts"]
+        end_s = points[-1]["read_at"] or points[-1]["ts"]
+        try:
+            if start_s and end_s:
+                t1 = datetime.fromisoformat(start_s.replace("Z", "+00:00"))
+                t2 = datetime.fromisoformat(end_s.replace("Z", "+00:00"))
+                duration_s = (t2 - t1).total_seconds()
+        except Exception as e:
+            print("[track] error parsing datetime:", e)
+            duration_s = None
 
     return {
         "device": device or str(DEFAULT_DEVICE_ID),
