@@ -1,11 +1,29 @@
-﻿from fastapi import FastAPI, Header, HTTPException, Depends, Query, Response
-from pydantic import BaseModel, field_validator
-from typing import Optional, List
-from datetime import datetime
-from db import fetchone, fetchall, execute
-from psycopg.types.json import Json
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from datetime import datetime, timezone
+from typing import Optional
+from db import fetchone, fetchall, execute, ping
+from psycopg import sql, Json
+import os
+
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
+
+# origenes permitidos (frontend público)
+allowed_origins = [
+    "https://iot-frontend-iota.vercel.app",
+    "https://iot-frontend-iota.vercel.app/",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # --- Auth por token de dispositivo (Bearer) ---
 def get_device_id(authorization: Optional[str] = Header(None)) -> str:
