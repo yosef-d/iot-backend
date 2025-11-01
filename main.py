@@ -1,189 +1,215 @@
-<<<<<<< HEAD
-# main.py
-from fastapi import FastAPI, HTTPException, Header
-=======
-﻿from fastapi import FastAPI, HTTPException, Header
->>>>>>> fee32d4 (remove ping import from main)
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-<<<<<<< HEAD
-from datetime import datetime, timezone
-=======
-from db import fetchone, fetchall, execute
-from psycopg import sql, Json
 import os
->>>>>>> fee32d4 (remove ping import from main)
+from datetime import datetime, timezone
+from uuid import UUID
 
-from db import fetchone, fetchall, execute  # 👈 OJO: aquí ya NO va 'ping'
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from psycopg.types.json import Json
 
-SAFE_TOKEN = "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG"
+# 👇 OJO: en db.py sí tenemos estos tres helpers
+from db import fetchone, fetchall, execute
 
-app = FastAPI(title="IoT Ingest API")
+# =========================================================
+# CONFIGURACIÓN BÁSICA
+# =========================================================
 
-# 👇 orígenes permitidos (Vercel + local)
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://iot-frontend-iota.vercel.app",
-]
+# este es el token que usas en PowerShell
+SAFE_TOKEN = os.getenv(
+    "SAFE_TOKEN",
+    "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG",
+)
 
+# este es el device que ya existe en tu tabla (lo vimos en Neon)
+DEFAULT_DEVICE_ID = UUID("0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9")
+
+app = FastAPI(title="IoT Ingest API", version="1.0.0")
+
+# permitir frontend local y el de vercel
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://iot-frontend-iota.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-@app.get("/")
-def root():
-    return {"ok": True, "msg": "iot-backend up"}
-
-
-@app.get("/health")
-def health():
-    # mismo patrón que ya te había salido bien: probar la DB con un SELECT 1
-    try:
-        row = fetchone("SELECT 1;")
-        db_ok = bool(row and row[0] == 1)
-    except Exception:
-        db_ok = False
-    return {"ok": True, "db": db_ok}
-
-
-from pydantic import BaseModel
-
+# =========================================================
+# MODELOS
+# =========================================================
 
 class ReadingIn(BaseModel):
     lat: float
     lon: float
-    alt: Optional[float] = None
-    time: Optional[str] = None
+    alt: float | None = None
+    time: datetime | None = None
 
 
-def _require_token(auth_header: Optional[str]):
-    if not auth_header:
+# =========================================================
+# HELPERS
+# =========================================================
+
+def require_token(authorization: str | None):
+    """Valida 'Authorization: Bearer <token>'."""
+    if not authorization:
         raise HTTPException(status_code=401, detail="missing_token")
-    # esperamos formato: "Bearer <token>"
-    parts = auth_header.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1] != SAFE_TOKEN:
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="invalid_auth_header")
+    if parts[1] != SAFE_TOKEN:
         raise HTTPException(status_code=401, detail="invalid_token")
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# =========================================================
+# ENDPOINTS
+# =========================================================
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "iot-backend", "uptime": utcnow().isoformat()}
+
+
+@app.get("/health")
+def health():
+    """
+    Comprueba que la app corre y que la DB responde.
+    """
+    row = fetchone("SELECT 1 AS ok;")
+    return {"ok": True, "db": bool(row and row.get("ok") == 1)}
 
 
 @app.post("/ingest_lite")
 def ingest_lite(
     payload: ReadingIn,
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    authorization: str | None = Header(default=None),
 ):
-    _require_token(authorization)
-
-    # timestamp del servidor
-    ts = datetime.now(timezone.utc)
+    """
+    Versión mínima: guarda lat/lon (+ alt si viene).
+    """
+    require_token(authorization)
 
     row = execute(
         """
         INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at, payload)
-        VALUES (
-            '0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9',
-            %s, %s, %s, %s, %s, %s
-        )
+        VALUES (%s, NOW(), %s, %s, %s, %s, %s)
         RETURNING id;
         """,
         (
-            ts,
-            payload.lat,
-            payload.lon,
-            payload.alt,
-            None,
-            None,
+            str(DEFAULT_DEVICE_ID),
+            float(payload.lat),
+            float(payload.lon),
+            float(payload.alt) if payload.alt is not None else None,
+            payload.time,
+            Json(
+                {
+                    "lat": payload.lat,
+                    "lon": payload.lon,
+                    "alt": payload.alt,
+                    "time": payload.time.isoformat() if payload.time else None,
+                }
+            ),
         ),
     )
-    inserted_id = row[0] if row else None
-    return {"inserted_id": inserted_id}
+    return {"inserted_id": row["id"]}
 
 
 @app.post("/ingest")
 def ingest(
     payload: ReadingIn,
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    authorization: str | None = Header(default=None),
 ):
-    _require_token(authorization)
-
-    # si viene time en el JSON, úsalo; si no, usa ahora()
-    if payload.time:
-        try:
-            read_at = datetime.fromisoformat(payload.time.replace("Z", "+00:00"))
-        except Exception:
-            read_at = None
-    else:
-        read_at = None
-
-    ts = datetime.now(timezone.utc)
+    """
+    Versión completa: igual a ingest_lite pero explícita.
+    """
+    require_token(authorization)
 
     row = execute(
         """
         INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at, payload)
-        VALUES (
-            '0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9',
-            %s, %s, %s, %s, %s, %s
-        )
+        VALUES (%s, NOW(), %s, %s, %s, %s, %s)
         RETURNING id;
         """,
         (
-            ts,
-            payload.lat,
-            payload.lon,
-            payload.alt,
-            read_at,
-            {
-                "lat": payload.lat,
-                "lon": payload.lon,
-                "alt": payload.alt,
-                "time": payload.time,
-            },
+            str(DEFAULT_DEVICE_ID),
+            float(payload.lat),
+            float(payload.lon),
+            float(payload.alt) if payload.alt is not None else None,
+            payload.time,
+            Json(
+                {
+                    "lat": payload.lat,
+                    "lon": payload.lon,
+                    "alt": payload.alt,
+                    "time": payload.time.isoformat() if payload.time else None,
+                }
+            ),
         ),
     )
-    inserted_id = row[0] if row else None
-    return {"inserted_id": inserted_id}
+    return {"inserted_id": row["id"]}
 
 
 @app.get("/readings/recent")
-def recent(limit: int = 50, device: Optional[str] = None):
-    if device:
-        rows = fetchall(
-            """
-            SELECT id, device_id, ts, lat, lon, alt_m, read_at, payload
-            FROM readings
-            WHERE device_id = %s
-            ORDER BY ts DESC
-            LIMIT %s;
-            """,
-            (device, limit),
-        )
-    else:
-        rows = fetchall(
-            """
-            SELECT id, device_id, ts, lat, lon, alt_m, read_at, payload
-            FROM readings
-            ORDER BY ts DESC
-            LIMIT %s;
-            """,
-            (limit,),
-        )
+def recent(
+    limit: int = 50,
+    device: UUID | None = None,
+):
+    """
+    Últimas lecturas para mostrar en la tabla del frontend.
+    """
+    if device is None:
+        device = DEFAULT_DEVICE_ID
 
-    items = []
-    for r in rows or []:
-        items.append(
-            {
-                "id": r[0],
-                "device_id": r[1],
-                "ts": r[2],
-                "lat": r[3],
-                "lon": r[4],
-                "alt_m": r[5],
-                "read_at": r[6],
-                "payload": r[7],
-            }
-        )
-    return {"items": items}
+    rows = fetchall(
+        """
+        SELECT id, device_id, lat, lon, alt_m, read_at, ts
+        FROM readings
+        WHERE device_id = %s
+        ORDER BY ts DESC
+        LIMIT %s;
+        """,
+        (str(device), limit),
+    )
+    return {"items": rows}
+
+
+@app.get("/readings/track")
+def track(
+    device: UUID = Query(..., description="UUID del dispositivo"),
+    start: datetime | None = Query(None, description="inicio ISO"),
+    end: datetime | None = Query(None, description="fin ISO"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+):
+    """
+    Devuelve los puntos de una ruta para un device en un intervalo.
+    Sirve para que el frontend pinte el trayecto en un mapa.
+    """
+    clauses = ["device_id = %s"]
+    params: list = [str(device)]
+
+    if start is not None:
+        clauses.append("ts >= %s")
+        params.append(start)
+    if end is not None:
+        clauses.append("ts <= %s")
+        params.append(end)
+
+    order_sql = "ASC" if order.lower() == "asc" else "DESC"
+
+    where_sql = " AND ".join(clauses)
+    query = f"""
+        SELECT id, device_id, lat, lon, alt_m, read_at, ts
+        FROM readings
+        WHERE {where_sql}
+        ORDER BY ts {order_sql};
+    """
+
+    rows = fetchall(query, tuple(params))
+    return {"items": rows}
