@@ -148,13 +148,12 @@ def recent(
 
 # ⬇️ ⬇️ ⬇️ AQUÍ REEMPLAZAS TU /readings/track VIEJO POR ESTE ⬇️ ⬇️ ⬇️
 @app.get("/readings/track")
-def readings_track(device: str | None = None):
+def readings_track():
     """
-    Devuelve los puntos de un dispositivo en orden de tiempo
-    + un pequeño resumen (distancia y duración).
+    Versión mínima: regresa TODAS las lecturas del device por defecto,
+    en orden de tiempo ASC, sin cálculos.
     """
-    if device is None or device.strip() == "":
-        device = str(DEFAULT_DEVICE_ID)
+    device = str(DEFAULT_DEVICE_ID)
 
     try:
         rows = fetchall(
@@ -167,16 +166,19 @@ def readings_track(device: str | None = None):
             (device,),
         )
     except Exception as e:
-        print("[/readings/track] ERROR consultando DB:", e)
+        # esto lo vas a ver en los logs de Railway
+        print("[/readings/track] DB ERROR:", e)
         raise HTTPException(status_code=500, detail="db_error")
 
-    points: list[dict] = []
+    points = []
     for r in rows:
+        # normalizamos a tipos simples
         lat = float(r["lat"]) if r["lat"] is not None else None
         lon = float(r["lon"]) if r["lon"] is not None else None
 
+        # las fechas en Neon a veces vienen como datetime, a veces como string
         def to_iso(x):
-            if not x:
+            if x is None:
                 return None
             if isinstance(x, datetime):
                 return x.isoformat()
@@ -194,49 +196,10 @@ def readings_track(device: str | None = None):
             }
         )
 
-    def haversine_m(lat1, lon1, lat2, lon2):
-        import math
-        R = 6371000.0
-        phi1 = math.radians(lat1)
-        phi2 = math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dlmb = math.radians(lon2 - lon1)
-        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        return R * c
-
-    total_dist = 0.0
-    for i in range(1, len(points)):
-        p1 = points[i - 1]
-        p2 = points[i]
-        if (
-            p1["lat"] is not None
-            and p1["lon"] is not None
-            and p2["lat"] is not None
-            and p2["lon"] is not None
-        ):
-            total_dist += haversine_m(p1["lat"], p1["lon"], p2["lat"], p2["lon"])
-
-    duration_s = None
-    if len(points) >= 2:
-        start_s = points[0]["read_at"] or points[0]["ts"]
-        end_s = points[-1]["read_at"] or points[-1]["ts"]
-        try:
-            if start_s and end_s:
-                t1 = datetime.fromisoformat(start_s.replace("Z", "+00:00"))
-                t2 = datetime.fromisoformat(end_s.replace("Z", "+00:00"))
-                duration_s = (t2 - t1).total_seconds()
-        except Exception as e:
-            print("[/readings/track] ERROR parseando fechas:", e)
-            duration_s = None
-
     return {
         "device": device,
+        "count": len(points),
         "points": points,
-        "summary": {
-            "count": len(points),
-            "distance_m": round(total_dist, 2),
-            "duration_s": duration_s,
-        },
     }
+
 # ⬆️ ⬆️ ⬆️ HASTA AQUÍ
