@@ -1,8 +1,18 @@
+<<<<<<< HEAD
 # main.py
 from fastapi import FastAPI, HTTPException, Header
+=======
+﻿from fastapi import FastAPI, HTTPException, Header
+>>>>>>> fee32d4 (remove ping import from main)
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
+<<<<<<< HEAD
 from datetime import datetime, timezone
+=======
+from db import fetchone, fetchall, execute
+from psycopg import sql, Json
+import os
+>>>>>>> fee32d4 (remove ping import from main)
 
 from db import fetchone, fetchall, execute  # 👈 OJO: aquí ya NO va 'ping'
 
