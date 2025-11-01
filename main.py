@@ -1,26 +1,19 @@
 import os
-import math
 from datetime import datetime, timezone
 from uuid import UUID
-from typing import Optional, Any
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from psycopg.types.json import Json
 
 from db import fetchone, fetchall, execute
 
-# =========================================================
-# CONFIG
-# =========================================================
-
 SAFE_TOKEN = os.getenv(
     "SAFE_TOKEN",
     "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG",
 )
 
-# este es el que ya existe en tu DB
 DEFAULT_DEVICE_ID = UUID("0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9")
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
@@ -37,20 +30,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================================================
-# MODELOS
-# =========================================================
-
 class ReadingIn(BaseModel):
     lat: float
     lon: float
     alt: float | None = None
     time: datetime | None = None
 
-
-# =========================================================
-# HELPERS
-# =========================================================
 
 def require_token(authorization: str | None):
     if not authorization:
@@ -65,30 +50,6 @@ def require_token(authorization: str | None):
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371000.0
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlmb = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-
-def safe_iso(dt: Any) -> Optional[str]:
-    if not dt:
-        return None
-    if isinstance(dt, datetime):
-        return dt.isoformat()
-    # por si viniera string
-    return str(dt)
-
-
-# =========================================================
-# ENDPOINTS
-# =========================================================
 
 @app.get("/")
 def root():
@@ -168,14 +129,10 @@ def ingest(
 @app.get("/readings/recent")
 def recent(
     limit: int = 50,
-    device: Optional[str] = None,
+    device: UUID | None = None,
 ):
-    """
-    Últimas lecturas.
-    Si no mandas ?device= usa el que usamos en ingest.
-    """
     if device is None:
-        device = str(DEFAULT_DEVICE_ID)
+        device = DEFAULT_DEVICE_ID
 
     rows = fetchall(
         """
@@ -185,74 +142,69 @@ def recent(
         ORDER BY ts DESC
         LIMIT %s;
         """,
-        (device, limit),
+        (str(device), limit),
     )
     return {"items": rows}
 
-
+# ⬇️ ⬇️ ⬇️ AQUÍ REEMPLAZAS TU /readings/track VIEJO POR ESTE ⬇️ ⬇️ ⬇️
 @app.get("/readings/track")
-def readings_track(
-    device: Optional[str] = Query(None, description="ID lógico o UUID del dispositivo"),
-    start: datetime | None = Query(None, description="inicio ISO"),
-    end: datetime | None = Query(None, description="fin ISO"),
-    order: str = Query("asc", description="asc o desc"),
-    limit: int = Query(500, ge=1, le=2000),
-):
+def readings_track(device: str | None = None):
     """
-    Regresa puntos para pintar la ruta y un resumen.
+    Devuelve los puntos de un dispositivo en orden de tiempo
+    + un pequeño resumen (distancia y duración).
     """
-    # --- construir WHERE ---
-    clauses: list[str] = []
-    params: list[Any] = []
+    if device is None or device.strip() == "":
+        device = str(DEFAULT_DEVICE_ID)
 
-    if device:
-        clauses.append("device_id = %s")
-        params.append(device)
-    else:
-        # si no mandan device, usa el de siempre
-        clauses.append("device_id = %s")
-        params.append(str(DEFAULT_DEVICE_ID))
+    try:
+        rows = fetchall(
+            """
+            SELECT id, device_id, lat, lon, alt_m, read_at, ts
+            FROM readings
+            WHERE device_id = %s
+            ORDER BY ts ASC;
+            """,
+            (device,),
+        )
+    except Exception as e:
+        print("[/readings/track] ERROR consultando DB:", e)
+        raise HTTPException(status_code=500, detail="db_error")
 
-    if start is not None:
-        clauses.append("ts >= %s")
-        params.append(start)
-    if end is not None:
-        clauses.append("ts <= %s")
-        params.append(end)
-
-    where_sql = " AND ".join(clauses) if clauses else "TRUE"
-    order_sql = "ASC" if order.lower() == "asc" else "DESC"
-
-    query = f"""
-        SELECT id, device_id, lat, lon, alt_m, read_at, ts
-        FROM readings
-        WHERE {where_sql}
-        ORDER BY read_at {order_sql} NULLS LAST, ts {order_sql}
-        LIMIT %s;
-    """
-    params.append(limit)
-
-    rows = fetchall(query, tuple(params))
-
-    # log sencillo para Railway
-    print(f"[track] device={device} rows={len(rows)}")
-
-    # --- normalizar para frontend ---
-    points: list[dict[str, Any]] = []
+    points: list[dict] = []
     for r in rows:
+        lat = float(r["lat"]) if r["lat"] is not None else None
+        lon = float(r["lon"]) if r["lon"] is not None else None
+
+        def to_iso(x):
+            if not x:
+                return None
+            if isinstance(x, datetime):
+                return x.isoformat()
+            return str(x)
+
         points.append(
             {
                 "id": r["id"],
                 "device_id": r["device_id"],
-                "lat": float(r["lat"]) if r["lat"] is not None else None,
-                "lon": float(r["lon"]) if r["lon"] is not None else None,
+                "lat": lat,
+                "lon": lon,
                 "alt_m": float(r["alt_m"]) if r["alt_m"] is not None else None,
-                "read_at": safe_iso(r["read_at"]),
-                "ts": safe_iso(r["ts"]),
+                "read_at": to_iso(r["read_at"]),
+                "ts": to_iso(r["ts"]),
             }
         )
 
-    # --- distancia ---
+    def haversine_m(lat1, lon1, lat2, lon2):
+        import math
+        R = 6371000.0
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlmb = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
     total_dist = 0.0
     for i in range(1, len(points)):
         p1 = points[i - 1]
@@ -265,8 +217,7 @@ def readings_track(
         ):
             total_dist += haversine_m(p1["lat"], p1["lon"], p2["lat"], p2["lon"])
 
-    # --- duración ---
-    duration_s: Optional[float] = None
+    duration_s = None
     if len(points) >= 2:
         start_s = points[0]["read_at"] or points[0]["ts"]
         end_s = points[-1]["read_at"] or points[-1]["ts"]
@@ -276,11 +227,11 @@ def readings_track(
                 t2 = datetime.fromisoformat(end_s.replace("Z", "+00:00"))
                 duration_s = (t2 - t1).total_seconds()
         except Exception as e:
-            print("[track] error parsing datetime:", e)
+            print("[/readings/track] ERROR parseando fechas:", e)
             duration_s = None
 
     return {
-        "device": device or str(DEFAULT_DEVICE_ID),
+        "device": device,
         "points": points,
         "summary": {
             "count": len(points),
@@ -288,3 +239,4 @@ def readings_track(
             "duration_s": duration_s,
         },
     }
+# ⬆️ ⬆️ ⬆️ HASTA AQUÍ
