@@ -148,6 +148,8 @@ def ingest(payload: ReadingIn, authorization: str | None = Header(default=None))
 
 
 @app.get("/readings/recent")
+
+
 def recent(limit: int = 50, device: UUID | None = None):
     if device is None:
         device = DEFAULT_DEVICE_ID
@@ -170,44 +172,26 @@ def recent(limit: int = 50, device: UUID | None = None):
 # =========================================================
 
 @app.get("/readings/track")
-def readings_track():
+def readings_track(
+    limit: int = 500,
+):
     """
-    Devuelve TODOS los puntos del device por defecto en orden ASC.
-    Sin filtros, sin fechas, sin distancia, sin nada.
+    Devuelve los puntos más recientes del device por defecto.
+    Esto NO pide query params y usa el UUID fijo que ya existe.
     """
-    device = str(DEFAULT_DEVICE_ID)
-
     try:
         rows = fetchall(
             """
             SELECT id, device_id, lat, lon, alt_m, read_at, ts
             FROM readings
             WHERE device_id = %s
-            ORDER BY ts ASC;
+            ORDER BY ts ASC
+            LIMIT %s;
             """,
-            (device,),
+            (str(DEFAULT_DEVICE_ID), limit),
         )
+        return {"items": rows}
     except Exception as e:
-        # Esto debe aparecer en los logs de Railway
-        print("[/readings/track] DB ERROR:", e)
-        raise HTTPException(status_code=500, detail="db_error")
-
-    points: list[dict] = []
-    for r in rows:
-        points.append(
-            {
-                "id": r["id"],
-                "device_id": r["device_id"],
-                "lat": float(r["lat"]) if r["lat"] is not None else None,
-                "lon": float(r["lon"]) if r["lon"] is not None else None,
-                "alt_m": float(r["alt_m"]) if r["alt_m"] is not None else None,
-                "read_at": dt_to_iso(r["read_at"]),
-                "ts": dt_to_iso(r["ts"]),
-            }
-        )
-
-    return {
-        "device": device,
-        "count": len(points),
-        "points": points,
-    }
+        # ojo: esto es solo para que veas el error real en Railway
+        # y no solo "db_error"
+        raise HTTPException(status_code=500, detail=f"db_error: {e}")
