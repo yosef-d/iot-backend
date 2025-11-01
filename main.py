@@ -7,13 +7,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from psycopg.types.json import Json
 
+# estos sí existen en tu repo
 from db import fetchone, fetchall, execute
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 SAFE_TOKEN = os.getenv(
     "SAFE_TOKEN",
     "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG",
 )
 
+# el que vimos en Neon
 DEFAULT_DEVICE_ID = UUID("0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9")
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
@@ -30,12 +36,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# =========================================================
+# MODELOS
+# =========================================================
+
 class ReadingIn(BaseModel):
     lat: float
     lon: float
     alt: float | None = None
     time: datetime | None = None
 
+
+# =========================================================
+# HELPERS
+# =========================================================
 
 def require_token(authorization: str | None):
     if not authorization:
@@ -51,6 +66,18 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def dt_to_iso(x):
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x.isoformat()
+    return str(x)
+
+
+# =========================================================
+# ENDPOINTS BÁSICOS
+# =========================================================
+
 @app.get("/")
 def root():
     return {"ok": True, "service": "iot-backend", "uptime": utcnow().isoformat()}
@@ -63,10 +90,7 @@ def health():
 
 
 @app.post("/ingest_lite")
-def ingest_lite(
-    payload: ReadingIn,
-    authorization: str | None = Header(default=None),
-):
+def ingest_lite(payload: ReadingIn, authorization: str | None = Header(default=None)):
     require_token(authorization)
 
     row = execute(
@@ -95,10 +119,7 @@ def ingest_lite(
 
 
 @app.post("/ingest")
-def ingest(
-    payload: ReadingIn,
-    authorization: str | None = Header(default=None),
-):
+def ingest(payload: ReadingIn, authorization: str | None = Header(default=None)):
     require_token(authorization)
 
     row = execute(
@@ -127,10 +148,7 @@ def ingest(
 
 
 @app.get("/readings/recent")
-def recent(
-    limit: int = 50,
-    device: UUID | None = None,
-):
+def recent(limit: int = 50, device: UUID | None = None):
     if device is None:
         device = DEFAULT_DEVICE_ID
 
@@ -146,12 +164,16 @@ def recent(
     )
     return {"items": rows}
 
-# ⬇️ ⬇️ ⬇️ AQUÍ REEMPLAZAS TU /readings/track VIEJO POR ESTE ⬇️ ⬇️ ⬇️
+
+# =========================================================
+# NUEVO: TRACK (VERSIÓN ULTRA SIMPLE)
+# =========================================================
+
 @app.get("/readings/track")
 def readings_track():
     """
-    Versión mínima: regresa TODAS las lecturas del device por defecto,
-    en orden de tiempo ASC, sin cálculos.
+    Devuelve TODOS los puntos del device por defecto en orden ASC.
+    Sin filtros, sin fechas, sin distancia, sin nada.
     """
     device = str(DEFAULT_DEVICE_ID)
 
@@ -166,33 +188,21 @@ def readings_track():
             (device,),
         )
     except Exception as e:
-        # esto lo vas a ver en los logs de Railway
+        # Esto debe aparecer en los logs de Railway
         print("[/readings/track] DB ERROR:", e)
         raise HTTPException(status_code=500, detail="db_error")
 
-    points = []
+    points: list[dict] = []
     for r in rows:
-        # normalizamos a tipos simples
-        lat = float(r["lat"]) if r["lat"] is not None else None
-        lon = float(r["lon"]) if r["lon"] is not None else None
-
-        # las fechas en Neon a veces vienen como datetime, a veces como string
-        def to_iso(x):
-            if x is None:
-                return None
-            if isinstance(x, datetime):
-                return x.isoformat()
-            return str(x)
-
         points.append(
             {
                 "id": r["id"],
                 "device_id": r["device_id"],
-                "lat": lat,
-                "lon": lon,
+                "lat": float(r["lat"]) if r["lat"] is not None else None,
+                "lon": float(r["lon"]) if r["lon"] is not None else None,
                 "alt_m": float(r["alt_m"]) if r["alt_m"] is not None else None,
-                "read_at": to_iso(r["read_at"]),
-                "ts": to_iso(r["ts"]),
+                "read_at": dt_to_iso(r["read_at"]),
+                "ts": dt_to_iso(r["ts"]),
             }
         )
 
@@ -201,5 +211,3 @@ def readings_track():
         "count": len(points),
         "points": points,
     }
-
-# ⬆️ ⬆️ ⬆️ HASTA AQUÍ
