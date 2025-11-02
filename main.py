@@ -5,26 +5,27 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from psycopg.types.json import Json
 
-# 👇 estos helpers ya están en tu proyecto
+# 👇 estos vienen de tu db.py en Railway
 from db import fetchone, fetchall, execute
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-# token que usas en PowerShell
+# el token que usas en PowerShell
 SAFE_TOKEN = os.getenv(
     "SAFE_TOKEN",
     "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG",
 )
 
-# tu device fijo que ya existe en la tabla readings
+# el device fijo que ya existe en tu tabla
 DEFAULT_DEVICE_ID = UUID("0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9")
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
 
-# CORS para localhost y vercel
+# CORS: localhost + vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -53,9 +54,7 @@ class ReadingIn(BaseModel):
 # =========================================================
 
 def require_token(authorization: str | None):
-    """
-    Valida 'Authorization: Bearer <token>'.
-    """
+    """Valida 'Authorization: Bearer <token>'."""
     if not authorization:
         raise HTTPException(status_code=401, detail="missing_token")
     parts = authorization.split()
@@ -69,8 +68,26 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_inserted_id(db_result):
+    """
+    Tu Railway está devolviendo tuplas tipo (123,)
+    y a veces diccionarios tipo {"id": 123}.
+    Esto lo hace tolerante.
+    """
+    if db_result is None:
+        return None
+    # psycopg puede devolver Row, que soporta acceso por índice
+    if isinstance(db_result, (list, tuple)):
+        # ejemplo: (123,)
+        return db_result[0]
+    if isinstance(db_result, dict):
+        return db_result.get("id")
+    # último recurso
+    return db_result
+
+
 # =========================================================
-# ENDPOINTS BÁSICOS
+# ENDPOINTS
 # =========================================================
 
 @app.get("/")
@@ -82,27 +99,22 @@ def root():
 def health():
     """
     Comprueba que la app corre y que la DB responde.
-    Aquí soportamos que fetchone() devuelva TUPLA o DICCIONARIO.
+    Aquí NO usamos row.get(...) porque en tu caso viene como tupla.
     """
-    row = fetchone("SELECT 1 AS ok;")
+    try:
+        row = fetchone("SELECT 1 AS ok;")
+    except Exception:
+        raise HTTPException(status_code=500, detail="db_error")
 
-    db_ok = False
-    if row is None:
-        db_ok = False
+    ok_value = None
+    if isinstance(row, (list, tuple)):
+        # (1,)
+        ok_value = row[0]
     elif isinstance(row, dict):
-        db_ok = row.get("ok") == 1
-    elif isinstance(row, tuple):
-        # SELECT 1 AS ok; -> (1,)
-        db_ok = len(row) > 0 and row[0] == 1
-    else:
-        db_ok = False
+        ok_value = row.get("ok")
 
-    return {"ok": True, "db": db_ok}
+    return {"ok": True, "db": ok_value == 1}
 
-
-# =========================================================
-# INGESTA
-# =========================================================
 
 @app.post("/ingest_lite")
 def ingest_lite(
@@ -110,26 +122,39 @@ def ingest_lite(
     authorization: str | None = Header(default=None),
 ):
     """
-    Versión mínima: guarda lat/lon (+ alt si viene), SIN payload JSON.
-    Esto es lo que esperaba tu PowerShell.
+    Versión mínima: guarda lat/lon (+ alt si viene).
     """
     require_token(authorization)
 
-    row = execute(
-        """
-        INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at)
-        VALUES (%s, NOW(), %s, %s, %s, %s)
-        RETURNING id;
-        """,
-        (
-            str(DEFAULT_DEVICE_ID),
-            float(payload.lat),
-            float(payload.lon),
-            float(payload.alt) if payload.alt is not None else None,
-            payload.time,  # puede ser None
-        ),
-    )
-    return {"inserted_id": row["id"] if isinstance(row, dict) else row[0]}
+    try:
+        db_res = execute(
+            """
+            INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at, payload)
+            VALUES (%s, NOW(), %s, %s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (
+                str(DEFAULT_DEVICE_ID),
+                float(payload.lat),
+                float(payload.lon),
+                float(payload.alt) if payload.alt is not None else None,
+                payload.time,
+                Json(
+                    {
+                        "lat": payload.lat,
+                        "lon": payload.lon,
+                        "alt": payload.alt,
+                        "time": payload.time.isoformat() if payload.time else None,
+                    }
+                ),
+            ),
+        )
+    except Exception as e:
+        # esto ayuda mucho cuando algo truena en Railway
+        raise HTTPException(status_code=500, detail=f"db_insert_error: {e!s}")
+
+    inserted_id = get_inserted_id(db_res)
+    return {"inserted_id": inserted_id}
 
 
 @app.post("/ingest")
@@ -138,30 +163,39 @@ def ingest(
     authorization: str | None = Header(default=None),
 ):
     """
-    Versión completa: igual a ingest_lite, SIN payload JSON.
+    Versión completa: igual a ingest_lite pero explícita.
     """
     require_token(authorization)
 
-    row = execute(
-        """
-        INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at)
-        VALUES (%s, NOW(), %s, %s, %s, %s)
-        RETURNING id;
-        """,
-        (
-            str(DEFAULT_DEVICE_ID),
-            float(payload.lat),
-            float(payload.lon),
-            float(payload.alt) if payload.alt is not None else None,
-            payload.time,
-        ),
-    )
-    return {"inserted_id": row["id"] if isinstance(row, dict) else row[0]}
+    try:
+        db_res = execute(
+            """
+            INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at, payload)
+            VALUES (%s, NOW(), %s, %s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (
+                str(DEFAULT_DEVICE_ID),
+                float(payload.lat),
+                float(payload.lon),
+                float(payload.alt) if payload.alt is not None else None,
+                payload.time,
+                Json(
+                    {
+                        "lat": payload.lat,
+                        "lon": payload.lon,
+                        "alt": payload.alt,
+                        "time": payload.time.isoformat() if payload.time else None,
+                    }
+                ),
+            ),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"db_insert_error: {e!s}")
 
+    inserted_id = get_inserted_id(db_res)
+    return {"inserted_id": inserted_id}
 
-# =========================================================
-# LECTURAS
-# =========================================================
 
 @app.get("/readings/recent")
 def recent(
@@ -189,14 +223,14 @@ def recent(
 
 @app.get("/readings/track")
 def track(
-    device: UUID | None = None,
+    device: UUID | None = Query(None, description="UUID del dispositivo; si no, usa el default"),
     start: datetime | None = Query(None, description="inicio ISO"),
     end: datetime | None = Query(None, description="fin ISO"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
 ):
     """
     Devuelve los puntos de una ruta para un device en un intervalo.
-    Si no mandas device, usa el DEFAULT_DEVICE_ID.
+    Sirve para que el frontend pinte el trayecto en un mapa.
     """
     if device is None:
         device = DEFAULT_DEVICE_ID
