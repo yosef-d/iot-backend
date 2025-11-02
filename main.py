@@ -5,27 +5,26 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from psycopg.types.json import Json
 
-# 👇 importa tus helpers reales
+# estos helpers ya los tienes en db.py
 from db import fetchone, fetchall, execute
 
 # =========================================================
-# CONFIG
+# CONFIG GENERAL
 # =========================================================
 
+# token que usas en PowerShell
 SAFE_TOKEN = os.getenv(
     "SAFE_TOKEN",
     "XK8q1vR3pN6tY9bM2fH5wJ7cL0dS4gA8zQ1eV6uP9kT3nR5mB8yC2hF7xL0aD4sG",
 )
 
-# este es el device que ya existe en tu DB
+# este es el device que ya existe en tu tabla readings en Neon
 DEFAULT_DEVICE_ID = UUID("0aef3bcc-b74b-47ce-9514-7eeb87bcb1a9")
-
 
 app = FastAPI(title="IoT Ingest API", version="1.0.0")
 
-# CORS para que el Vercel y el localhost puedan pegarle
+# CORS: tu localhost y tu Vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -38,18 +37,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # =========================================================
 # MODELOS
 # =========================================================
 
 class ReadingIn(BaseModel):
-    """
-    Este es el formato que ESPERAMOS recibir.
-    OJO: si en PowerShell lo mandas así:
-        { "lat": 19.5, "lon": -99.14, "alt": 2242, "time": "2025-11-01T14:30:00Z" }
-    esto entra perfecto.
-    """
     lat: float
     lon: float
     alt: float | None = None
@@ -61,12 +53,16 @@ class ReadingIn(BaseModel):
 # =========================================================
 
 def require_token(authorization: str | None):
-    """Valida Authorization: Bearer ..."""
+    """
+    Valida que venga:  Authorization: Bearer <token>
+    """
     if not authorization:
         raise HTTPException(status_code=401, detail="missing_token")
+
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="invalid_auth_header")
+
     if parts[1] != SAFE_TOKEN:
         raise HTTPException(status_code=401, detail="invalid_token")
 
@@ -75,54 +71,34 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _insert_reading(
-    *,
-    device_id: UUID,
-    lat: float,
-    lon: float,
-    alt: float | None,
-    read_at: datetime | None,
-    raw_payload: dict,
-):
-    """
-    Función auxiliar que realmente mete el registro.
-    La separamos para poder envolverla en try/except en los endpoints.
-    """
-    row = execute(
-        """
-        INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at, payload)
-        VALUES (%s, NOW(), %s, %s, %s, %s, %s)
-        RETURNING id;
-        """,
-        (
-            str(device_id),
-            float(lat),
-            float(lon),
-            float(alt) if alt is not None else None,
-            read_at,
-            Json(raw_payload),
-        ),
-    )
-    return row["id"]
-
-
 # =========================================================
 # ENDPOINTS BÁSICOS
 # =========================================================
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": "iot-backend", "uptime": utcnow().isoformat()}
+    return {
+        "ok": True,
+        "service": "iot-backend",
+        "uptime": utcnow().isoformat(),
+    }
 
 
 @app.get("/health")
 def health():
-    row = fetchone("SELECT 1 AS ok;")
-    return {"ok": True, "db": bool(row and row.get("ok") == 1)}
+    """
+    Comprueba que la app corre y que la DB responde.
+    """
+    try:
+        row = fetchone("SELECT 1 AS ok;")
+        return {"ok": True, "db": bool(row and row.get("ok") == 1)}
+    except Exception as e:
+        # si hay un problema de conexión a la db
+        raise HTTPException(status_code=500, detail=f"db_error: {e!s}")
 
 
 # =========================================================
-# INGEST (dos variantes)
+# INGESTA
 # =========================================================
 
 @app.post("/ingest_lite")
@@ -131,31 +107,28 @@ def ingest_lite(
     authorization: str | None = Header(default=None),
 ):
     """
-    Variante mínima. La dejamos por compatibilidad.
+    Versión mínima: guarda lat/lon (+ alt si viene) con el device por default.
     """
     require_token(authorization)
 
-    # construimos el payload crudo que guardaremos en JSON
-    payload_json = {
-        "lat": payload.lat,
-        "lon": payload.lon,
-        "alt": payload.alt,
-        "time": payload.time.isoformat() if payload.time else None,
-    }
-
     try:
-        new_id = _insert_reading(
-            device_id=DEFAULT_DEVICE_ID,
-            lat=payload.lat,
-            lon=payload.lon,
-            alt=payload.alt,
-            read_at=payload.time,
-            raw_payload=payload_json,
+        row = execute(
+            """
+            INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at)
+            VALUES (%s, NOW(), %s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (
+                str(DEFAULT_DEVICE_ID),
+                float(payload.lat),
+                float(payload.lon),
+                float(payload.alt) if payload.alt is not None else None,
+                payload.time,
+            ),
         )
-        return {"inserted_id": new_id}
+        return {"inserted_id": row["id"]}
     except Exception as e:
-        # 🔴 AQUI es donde ANTES se te perdía el error
-        # ahora lo regresamos TAL CUAL
+        # aquí es donde antes te daba 500 sin explicar
         raise HTTPException(status_code=500, detail=f"db_error: {e!s}")
 
 
@@ -165,35 +138,33 @@ def ingest(
     authorization: str | None = Header(default=None),
 ):
     """
-    Endpoint principal. Úsame para PowerShell.
+    Versión completa (igual que la lite pero más explícita).
+    La dejamos así para que tu PowerShell la use.
     """
     require_token(authorization)
 
-    payload_json = {
-        "lat": payload.lat,
-        "lon": payload.lon,
-        "alt": payload.alt,
-        "time": payload.time.isoformat() if payload.time else None,
-    }
-
     try:
-        new_id = _insert_reading(
-            device_id=DEFAULT_DEVICE_ID,
-            lat=payload.lat,
-            lon=payload.lon,
-            alt=payload.alt,
-            read_at=payload.time,
-            raw_payload=payload_json,
+        row = execute(
+            """
+            INSERT INTO readings (device_id, ts, lat, lon, alt_m, read_at)
+            VALUES (%s, NOW(), %s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (
+                str(DEFAULT_DEVICE_ID),
+                float(payload.lat),
+                float(payload.lon),
+                float(payload.alt) if payload.alt is not None else None,
+                payload.time,
+            ),
         )
-        return {"inserted_id": new_id}
+        return {"inserted_id": row["id"]}
     except Exception as e:
-        # 🔴 ESTE es el que te estaba devolviendo 500 sin decirte nada
-        # ahora sí vas a ver QUÉ dijo Postgres
         raise HTTPException(status_code=500, detail=f"db_error: {e!s}")
 
 
 # =========================================================
-# LISTADO / TABLA
+# LECTURAS
 # =========================================================
 
 @app.get("/readings/recent")
@@ -201,25 +172,28 @@ def recent(
     limit: int = 50,
     device: UUID | None = None,
 ):
+    """
+    Últimas lecturas para mostrar en la tabla del frontend.
+    Si no mandas device, usa el que definimos arriba.
+    """
     if device is None:
         device = DEFAULT_DEVICE_ID
 
-    rows = fetchall(
-        """
-        SELECT id, device_id, lat, lon, alt_m, read_at, ts
-        FROM readings
-        WHERE device_id = %s
-        ORDER BY ts DESC
-        LIMIT %s;
-        """,
-        (str(device), limit),
-    )
-    return {"items": rows}
+    try:
+        rows = fetchall(
+            """
+            SELECT id, device_id, lat, lon, alt_m, read_at, ts
+            FROM readings
+            WHERE device_id = %s
+            ORDER BY ts DESC
+            LIMIT %s;
+            """,
+            (str(device), limit),
+        )
+        return {"items": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"db_error: {e!s}")
 
-
-# =========================================================
-# TRACK PARA EL MAPA
-# =========================================================
 
 @app.get("/readings/track")
 def track(
@@ -229,8 +203,11 @@ def track(
     order: str = Query("asc", pattern="^(asc|desc)$"),
 ):
     """
-    Devuelve la ruta (todos los puntos) de un device.
-    Si no mandas ?device=... te mando el DEFAULT.
+    Devuelve los puntos de una ruta para un device en un intervalo.
+
+    - si no mandas ?device=... te pongo el device por default
+    - si mandas start/end te filtro
+    - order = asc|desc
     """
     if device is None:
         device = DEFAULT_DEVICE_ID
