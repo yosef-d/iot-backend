@@ -1,66 +1,32 @@
-﻿import os
-from functools import lru_cache
+﻿# db.py
+import os
 import psycopg
-from psycopg_pool import ConnectionPool
-from psycopg.types.json import Json  # <-- IMPORTANTE
+from psycopg.rows import dict_row
 
-def _normalize_url(url: str) -> str:
-    if "channel_binding=require" in url:
-        url = url.replace("channel_binding=require", "")
-        while "&&" in url:
-            url = url.replace("&&", "&")
-        url = url.rstrip("?&")
-    if "sslmode=" not in url:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}sslmode=require"
-    return url
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-def _conninfo() -> str:
-    url = os.getenv("DATABASE_URL", "").strip()
-    if not url:
-        raise RuntimeError("DATABASE_URL not set")
-    return _normalize_url(url)
+def get_conn():
+    return psycopg.connect(DATABASE_URL)
 
-@lru_cache
-def get_pool() -> ConnectionPool:
-    conninfo = _conninfo()
-    return ConnectionPool(conninfo=conninfo, min_size=1, max_size=5, open=True)
-
-def _adapt_params(params):
-    if params is None:
-        return ()
-    # Si es dict (named params) -> convertir cada dict anidado a Json
-    if isinstance(params, dict):
-        return {k: (Json(v) if isinstance(v, dict) else v) for k, v in params.items()}
-    # Si es tupla/lista -> convertir dicts dentro a Json
-    try:
-        return tuple(Json(p) if isinstance(p, dict) else p for p in params)
-    except TypeError:
-        # Si no es iterable (param único)
-        return Json(params) if isinstance(params, dict) else params
-
-def fetchone(query, params=None):
-    ap = _adapt_params(params)
-    pool = get_pool()
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, ap)
+def fetchone(query: str, params: tuple | None = None):
+    with get_conn() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params or ())
             return cur.fetchone()
 
-def fetchall(query, params=None):
-    ap = _adapt_params(params)
-    pool = get_pool()
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, ap)
+def fetchall(query: str, params: tuple | None = None):
+    with get_conn() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params or ())
             return cur.fetchall()
 
-def execute(query, params=None, returning=False):
-    ap = _adapt_params(params)
-    pool = get_pool()
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, ap)
-            if returning:
-                return cur.fetchone()
+def execute(query: str, params: tuple | None = None):
+    with get_conn() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params or ())
             conn.commit()
+            # si quieres que regrese algo cuando hay RETURNING:
+            try:
+                return cur.fetchone()
+            except psycopg.ProgrammingError:
+                return None
